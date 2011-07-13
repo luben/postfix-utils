@@ -15,6 +15,12 @@ RUN
 /etc/init.d/bounce-check start
 /etc/init.d/greycached   start
 
+IMPLEMENTATION
+
+All the services are written as asynchronous tcp servers. Bounce 
+services use select loop, greylisting service use high performance 
+EV loop (epoll, kqueue etc.).  
+
 POSTFIX CONFIGURATION
 
 bounce-sign:
@@ -35,6 +41,13 @@ Add "check_policy_service inet:127.0.0.1:10201" to smtpd_recipient_restrictions
 
 grycached:
 Add "check_policy_service inet:127.0.0.1:10222" to smtpd_recipient_restrictions
+
+
+SEE ALSO
+
+Another implementation and a good explanation of theprinciples of bounce
+signing:
+http://babel.de/batv.html
 
 
 LICENSE
