@@ -45,7 +45,7 @@ Add "check_policy_service inet:127.0.0.1:10222" to smtpd_recipient_restrictions
 
 SEE ALSO
 
-Another implementation and a good explanation of theprinciples of bounce
+Another implementation and a good explanation of the principles of bounce
 signing:
 http://babel.de/batv.html
 
