@@ -36,3 +36,8 @@ Add "check_policy_service inet:127.0.0.1:10201" to smtpd_recipient_restrictions
 grycached:
 Add "check_policy_service inet:127.0.0.1:10222" to smtpd_recipient_restrictions
 
+
+LICENSE
+
+Same as perl.
+
