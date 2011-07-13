@@ -1,30 +1,48 @@
 INSTALL 
-
+=======
 copy all files from perl directory to /etc/postfix/perl
 copy all files from init directory to /etc/init.d
 
-CONFIGURE
 
+CONFIGURE
+=========
 Edit conf files in /etc/postfix/perl
 Edit /etc/postfix/perl/bounce-sign and /etc/postfix/perl/bounce-check
 and change keys and domain regex on top of the files
 
+
 RUN
+===
+
+Provided are init scripts for Debian/Ubuntu systems.
 
 /etc/init.d/bounce-sign  start
 /etc/init.d/bounce-check start
 /etc/init.d/greycached   start
 
-IMPLEMENTATION
 
+IMPLEMENTATION
+==============
 All the services are written as asynchronous tcp servers. Bounce 
 services use select loop, greylisting service use high performance 
 EV loop (epoll, kqueue etc.).  
 
+
+PERFORMANCE
+===========
+Single connection benchmark on common hardware (AMD Athlon(tm) 64 X2 
+Dual Core Processor 3800+)
+
+          Rate  sign check
+sign   20576/s    --  -82%
+check 113636/s  452%    --
+
+
 POSTFIX CONFIGURATION
+=====================
 
 bounce-sign:
-
+-----------
 main.cf:
 sender_canonical_maps = tcp:127.0.0.1:10200
 canonical_classes=envelope_recipient,header_recipient
@@ -35,22 +53,23 @@ cat /etc/postfix/cleanup-prvs.regexp
 /^([^+]+)\+prvs=[0-9]{4}[0-9a-f]{6}@((corp\.)?example\.com)$/i $1@$2
 
 bounce-check:
-
+------------
 main.cf:
 Add "check_policy_service inet:127.0.0.1:10201" to smtpd_recipient_restrictions
 
 grycached:
+---------
 Add "check_policy_service inet:127.0.0.1:10222" to smtpd_recipient_restrictions
 
 
 SEE ALSO
-
+========
 Another implementation and a good explanation of the principles of bounce
 signing:
 http://babel.de/batv.html
 
 
 LICENSE
-
+======
 Same as perl.
 
