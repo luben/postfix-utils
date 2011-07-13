@@ -68,8 +68,16 @@ Another implementation and a good explanation of the principles of bounce
 signing:
 http://babel.de/batv.html
 
-
-LICENSE
+AUTHOR
 ======
-Same as perl.
+Luben Karavelov, "karavelov@mail.bg"
+
+COPYRIGHT AND LICENSE
+====================
+Copyright (C) 2010-2011 by Luben Karavelov.
+
+This library is free software; you can redistribute it and/or modify it under 
+the same terms as Perl itself, either Perl version 5.8.7 or, at your option, any 
+later version of Perl 5 you may have available.
+
 
