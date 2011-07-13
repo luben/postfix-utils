@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+use common::sense;
+use Digest::HMAC_SHA1 qw(hmac_sha1_hex);
+use base 'Net::Server::Multiplex';
+
+my @key = qw(example-bounce-key0 example-bounce-key1 example-bounce-key2 );
+my $domains  = qr{@(corp\.)?example\.com$};
+
+# Log Levels
+use constant {
+    LOG_ERR     => 0,
+    LOG_WARN    => 1,
+    LOG_NOTICE  => 2,
+    LOG_INFO    => 3,
+    LOG_DEBUG   => 4
+};
+
+sub check_bounce_sign {
+    my ($self, $req) = @_;
+    
+    if ($req->{sender} ne ''){    # Not DSN
+        $self->log(LOG_DEBUG,"Not DNS: %s => %s", $req->{sender}, $req->{recipient});
+        return 'dunno';
+    }
+    
+    if ($req->{recipient} !~ $domains){  # not signed return-path
+        $self->log(LOG_DEBUG,"Not protected: %s", $req->{recipient});
+        return 'dunno';
+    }
+
+    if ($req->{recipient} =~ /^(.+)\+prvs=(\d)(\d{3})([0-9a-f]{6})\@(.+)$/i){
+        my ($box,$domain,$curr_key,$day,$sign) = ($1, $5, $2, $3, $4);
+        my $recipient = "$box\@$domain";
+
+        # check signature
+        if (substr(hmac_sha1_hex($day.$key[$curr_key].$recipient),0,6) ne $sign){
+            $self->log(LOG_DEBUG,"Invalid signature: %s", $req->{recipient});
+            return "521 Invalid delivery status notification signature";
+        }
+
+        # check expiration 
+        my $today = int(time/(24*60*60))+8;
+        $today = substr($today,length($today)-3,3);
+
+        if      (($day >=$today) and ($day - $today <= 8  )) {  # OK
+            $self->log(LOG_DEBUG,"Signature OK: %s", $req->{recipient});
+            return 'dunno';
+        } elsif (($day < $today) and ($today - $day => 992)) {  # Wrap-arround
+            $self->log(LOG_DEBUG,"Signature OK: %s", $req->{recipient});
+            return 'dunno';
+        } else {                                                # Expired
+            $self->log(LOG_DEBUG,"Expired signature: %s, %d <=> %d", $req->{recipient}, $day, $today);
+            return '521 Expired delivery status notificatgion signature';
+        }
+    }
+    $self->log(LOG_DEBUG,"Expired DSN: %s", $req->{recipient});    
+    return "521 Invalid delivery status notification";
+}
+
+sub log {
+    my ($self,$level,$fmt,@rest) = @_;
+    if (defined $self->{net_server}){
+       $self->{net_server}->log($level,$fmt,@rest);
+    }else{
+        $self->SUPER::log($level,$fmt,@rest);
+    }
+}
+
+my %client;
+
+sub mux_connection {
+    my ($self,$mux,$fh) = @_;
+    $self->log(LOG_INFO, "Accepted socket %u", $fh->fileno);
+    $client{$fh} = {};
+}
+
+
+sub mux_input {
+    my ($self,$mux,$fh,$input) = @_;
+    while ($$input =~ s/^(.*?)\r?\n//) {
+        my $line = $1;
+        if ($line =~ /^(.+?)=(.*)$/){
+            $client{$fh}->{$1} = $2;
+            $self->log(LOG_DEBUG, "Client %u: %s => %s", $fh->fileno(), $1, $2); 
+        }elsif(length($line) == 0){
+            my $action = 'dunno';
+            if ($client{$fh}->{request}  eq 'smtpd_access_policy'){
+                $action = $self->check_bounce_sign($client{$fh});
+                $self->log(LOG_DEBUG, "Client %u: bounce-check: %s", $fh->fileno, $action);
+            }else{
+                $self->log(LOG_NOTICE, "Client %u: unknown request: %s", $fh->fileno, $client{request});
+            }
+            delete $client{$fh};
+            print "action=$action\n\n";
+        }else{
+            $self->log(LOG_NOTICE, "Client %u: mismatch %s", $fh->fileno, $line); 
+        }
+    }
+}
+
+sub mux_timeout {
+    my ($self,$mux,$fh);
+    $self->log(LOG_INFO, "Timeout on socket %u", $fh->fileno);
+    delete $client{$fh};
+}
+
+__PACKAGE__->run(conf_file => '/etc/postfix/perl/bounce-check.conf');

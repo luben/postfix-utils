@@ -1,0 +1,56 @@
+#! /bin/sh
+#
+# postfix-bounce-check  This init.d script is used to start Postfix bounce
+# checking daemon
+#
+
+### BEGIN INIT INFO
+# Provides:          bounce-check-daemon
+# Required-Start:    $network $syslog
+# Required-Stop:     $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Bounce Signing Server
+### END INIT INFO
+
+BIN=/etc/postfix/perl/bounce-check
+NAME=bounce-check
+DESC="Bounce Signature Checking Server"
+PID=/var/run/bounce-check.pid
+
+[ -x $BIN ] || exit 0
+
+# loading lsb functions
+. /lib/lsb/init-functions
+
+case "$1" in
+    start)
+        ulimit -n 8192
+        log_daemon_msg "Starting $DESC"
+        log_progress_msg "$NAME"
+        start_daemon -p $PID $BIN
+        log_end_msg "$?"
+        ;;
+
+    stop)
+        log_daemon_msg "Stopping $DESC"
+        log_progress_msg "$NAME"
+        killproc -p $PID $BIN
+        log_end_msg "$?"
+        ;;
+
+    restart|force-reload)
+        $0 stop
+        sleep 1
+        [ -f $PID ] && rm $PID
+        $0 start
+        ;;
+
+    *)
+        N=/etc/init.d/$NAME
+        echo "Usage: $N {start|stop|restart|reload|force-reload}" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

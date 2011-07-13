@@ -1,0 +1,300 @@
+#!/usr/bin/perl
+use IO::Socket::INET;
+use POSIX qw(setsid);
+use Socket qw(TCP_NODELAY);
+use EV;
+use common::sense;
+use Hash::ConsistentHash;
+use String::CRC32;
+use Config::Simple;
+use Sys::Syslog qw(:standard :macros);
+
+
+sub DEBUG()  { 0 };
+
+openlog('greycached', 'ndelay,pid', LOG_MAIL);
+setlogmask( LOG_UPTO(LOG_INFO) );
+
+my $cfg  =  new Config::Simple('/etc/postfix/perl/greycached.conf');
+
+my $hash = new Hash::ConsistentHash ( 
+    buckets   => [ $cfg->param('servers') ],
+    hash_func => \&crc32
+);
+
+my $redundancy = $cfg->param('redundancy');
+
+
+sub daemonize {
+    defined(my $pid = fork)    or die "Can't fork: $!";
+    if ($pid) {
+        open  PID, '>', $cfg->param('pid_file') or die $!;
+        print PID "-$pid";
+        close PID;
+        open  STDIN,  '/dev/null'   or die "Can't read /dev/null: $!";
+        open  STDOUT, '>>/dev/null' or die "Can't write to /dev/null: $!";
+        open  STDERR, '>>/dev/null' or die "Can't write to /dev/null: $!";
+        exit;
+    }
+    setsid or die "Can't start a new session: $!";
+    $> = getpwnam($cfg->param('user'));
+    $) = getpwnam($cfg->param('group'));
+    syslog(LOG_INFO,"Daemonized")
+}
+
+daemonize() unless DEBUG;
+
+# Bind
+my $sock = IO::Socket::INET->new( 
+        Listen    => 64,
+        LocalAddr => $cfg->param('addr'),
+        LocalPort => $cfg->param('port')+DEBUG,
+        Proto     => 'tcp',
+        ReuseAddr => 1,
+        Blocking  => 0)
+    or die $!;
+
+sub fork_workers {
+    my $n = shift;
+    for my $i (1..$n) {
+        defined(my $pid = fork) 
+            or die "Can't fork: $!";
+        unless ($pid){
+            return 0;
+        }
+    }
+    return 1;
+}
+
+if ((not DEBUG) and (fork_workers($cfg->param('workers'))>0)){
+    while ( wait > 0 ){
+        fork_workers(1);
+    }
+}
+
+## functions
+
+# Back End
+
+my %sock;
+sub be_srv {
+    my $srv = shift;
+    my $sock;
+    if (@{$sock{$srv}}){
+        $sock = shift @{$sock{$srv}};
+        syslog(LOG_DEBUG, "get cached $srv fd:".$sock->fileno());
+    }else{
+        $sock = IO::Socket::INET->new(
+                PeerAddr => $srv,
+                Timeout  => 0.001
+            );
+        syslog(LOG_DEBUG, "get new     $srv fd:".$sock->fileno());
+    }
+
+    return $sock;
+}
+
+sub be_cmd {
+    my ($server,$cmd,$cb) = @_;
+    my $sock = be_srv($server);
+    my $fd;
+    if ((defined $sock) and ( $sock->connected )){
+       $fd =  $sock->fileno 
+    }else{ 
+        syslog(LOG_NOTICE, "not connected to srv: $server");
+        $cb->();
+        return;
+    }
+
+    EV::once $sock, EV::WRITE, 2, sub {
+        $sock->syswrite($cmd);
+        syslog(LOG_DEBUG, " > $server($fd) : $cmd");
+        EV::once $sock, EV::READ, 2, sub {
+            my $result;
+            if ($sock->sysread($result,8192)){
+                syslog(LOG_DEBUG, " < $server($fd) : OK");
+                push @{$sock{$server}}, $sock;
+            }else{
+                syslog(LOG_DEBUG, " < $server($fd) : CLOSE");
+                $sock->shutdown(2);
+                $sock->close();
+            }
+            syslog(LOG_DEBUG, " < $server($fd) : $result");
+            $cb->($result);
+        }
+    }
+}
+
+sub be_read {
+    my ($cmd, $key,$yes,$no) = @_;
+    $cmd .= " $key\r\n";
+    my $next = $hash->lookup($key);
+    my ($i,$sub) = (0);
+    $sub = sub {
+        my $res = shift;
+        if ( defined $res and $res ne "END\r\n"){
+            $yes->($res);
+            undef $sub;
+        } elsif ($i++ < $redundancy){
+            my $server = $next->();
+            be_cmd($server,$cmd,$sub);
+        }else{
+            $no->($res);
+            undef $sub;
+        }
+    };
+    $sub->();
+}
+
+sub be_write {
+    my ($cmd, $key, $val, $expire, $cb) = @_;
+    if (ref $expire eq 'CODE'){
+        # case for delete and others
+        $cb     = $expire;
+        $cmd .= " $key $val\r\n";
+    }else{
+        # data modification cmds
+        $cmd .= " $key 0 $expire ".length($val)."\r\n$val\r\n";
+    }
+    my ($i,$done,$sub) = (0,0);
+    my $next = $hash->lookup($key);
+    $sub = sub {
+        my $res = shift;
+        if (( defined $res ) and (not $done)){
+            $done = 1;
+            $cb->($res);
+        } 
+        if ($i++ < $redundancy){
+            my $server = $next->();
+            be_cmd($server,$cmd,$sub);
+        }else{
+            undef $sub;
+        }
+    };
+    $sub->();
+}
+
+# Greylisting
+
+sub greylist {
+    my ($client,$ip,$from,$to) = @_;
+    my $net;
+    if ($ip =~ /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.\d{1,3}/){
+        $net = "$1.$2.$3";
+    }else{
+        syslog(LOG_INFO,"Greylist error from=<$from> to=<$to> ip=<$ip>");
+        resp($client, "action=defer_if_permit Internal error $ip: $from => $to");
+        return;
+    }
+
+    be_write('incr', "blacklist:$ip", 1,
+        sub {
+            my $blacklist = shift;
+            $blacklist =~ s/\r\n//g;
+            if (($blacklist =~ /^\d+$/) and ($blacklist > 100)){ 
+                syslog(LOG_INFO, "Blacklisted from=<$from> to=<$to> ip=<$ip>");
+                resp($client, 'action=defer_if_permit');
+            }else{
+                be_read('get',"whitelist:$net",
+                    # if whitelisted
+                    sub{
+                        be_write('delete',"blacklist:$ip", 0, sub {
+                            syslog(LOG_INFO, "Whitelisted from=<$from> to=<$to> ip=<$ip>");
+                            resp($client, 'action=dunno');
+                        });
+                    },
+                    # else
+                    sub{
+                        be_read('get', "greylist:$net:$from:$to",
+                            # if greylisted
+                            sub{
+                                my $last = (@_[0] =~ /\r\n(.+)\r\n/ && $1);
+                                if (($last == 1) or (time - $last > 60)) {
+                                    be_write('delete',"blacklist:$ip", 0, sub {
+                                        be_write('add', "whitelist:$net", 1, 604800, 
+                                            sub { 
+                                                syslog(LOG_INFO, "Greylist passed from=<$from> to=<$to> ip=<$ip>");
+                                                resp($client, 'action=dunno');
+                                            }
+                                        )
+                                    });
+                                }else{
+                                    syslog(LOG_INFO, "Greylist reactivated from=<$from> to=<$to> ip=<$ip>");
+                                    resp($client, 'action=defer_if_permit'); 
+                                }
+                            },
+                            # else
+                            sub{
+                                be_write('add',"greylist:$net:$from:$to", time, 10800,
+                                    sub{
+                                        syslog(LOG_INFO, "Greylist activated from=<$from> to=<$to> ip=<$ip>");
+                                        resp($client, 'action=defer_if_permit'); 
+                                    }
+                                );
+                                if ($blacklist !~ /^\d+$/){
+                                    # start blacklist counter if it does not exist (TTL 6h)
+                                    be_write('add',"blacklist:$ip", 1, 21600, sub {});
+                                }
+                            }
+                        );
+                    }
+                );
+            }
+        }
+    );
+}
+
+
+# Client
+sub req {
+    my $client = shift;
+    my ($watch,$request);
+    $watch = EV::io $client,EV::READ, sub {
+        my $buf; 
+        my $size = $client->sysread($buf,8192);
+        if ($size) {
+            while ($buf =~ s/^(.*?)\r?\n//) {
+                my $line = $1;
+                if ($line =~ /^(.+?)=(.*)$/){
+                    $request->{$1} = $2;
+                    syslog(LOG_DEBUG, "Client ".$client->fileno().": $1 => $2");
+                }elsif(length($line) == 0){
+                    undef $watch;
+                    greylist($client, $request->{client_address}, 
+                        $request->{sender}, $request->{recipient});
+                }else{
+                    syslog(LOG_INFO, "Client ".$client->fileno()." mismatch: $line");
+                }
+            }
+        }else{
+            syslog(LOG_DEBUG, "Client closing ".$client->fileno().", $size");
+            $client->shutdown(0);
+            undef $watch; 
+            return;
+        }
+    };
+}
+
+sub resp {
+    my ($client,$data) = @_;
+    $client->close() and return 
+        unless defined $data;
+    EV::once $client, EV::WRITE, undef, sub {
+        syslog(LOG_DEBUG,"<<<<< $data");
+        if ($client->syswrite("$data\n\n", length($data)+2)){
+            req($client);
+        }else{
+            $client->close();
+        }
+    };
+}
+
+my $watch; $watch = EV::io $sock, EV::READ, sub {
+    my $client = $sock->accept() or return;
+    $client->sockopt(TCP_NODELAY =>1);
+    $client->sockopt(SO_KEEPALIVE=>1);
+    $client->blocking(0);
+    req($client);
+};
+
+EV::loop;

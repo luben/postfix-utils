@@ -1,0 +1,56 @@
+#!/bin/sh
+# Start/stop the greycached daemon.
+#
+#### BEGIN INIT INFO
+# Provides:     greycached
+# Required-Start:   $syslog $memcached
+# Required-Stop:    $syslog $memcached
+# Should-Start:     $local_fs
+# Should-Stop:      $local_fs
+# Default-Start:    2 3 4 5
+# Default-Stop:     0 1 6
+# Short-Description:    greycached - Postfix greylisting server
+# Description:      greycached - Postfix greylisting server with memcached backend
+### END INIT INFO
+
+
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+DAEMON=/etc/postfix/perl/greycached
+NAME=greycached
+DESC="postfix greylisting server with memcached backend"
+PIDFILE=/var/run/$NAME.pid
+
+set -e
+
+case "$1" in
+  start)
+    echo -n "Starting $DESC: "
+    start-stop-daemon --start --quiet --exec $DAEMON
+    echo "$NAME."
+    ;;
+  stop)
+    echo -n "Stopping $DESC: "
+    start-stop-daemon --stop --quiet --oknodo --pidfile $PIDFILE
+    echo "$NAME."
+    rm -f $PIDFILE
+    ;;
+  restart)
+    #
+    #   If the "reload" option is implemented, move the "force-reload"
+    #   option to the "reload" entry above. If not, "force-reload" is
+    #   just the same as "restart".
+    #
+    echo -n "Restarting $DESC: "
+    start-stop-daemon --stop --quiet --oknodo --pidfile $PIDFILE
+    rm -f $PIDFILE
+    start-stop-daemon --start --quiet --exec $DAEMON
+    echo "$NAME."
+    ;;
+  *)
+    N=/etc/init.d/$NAME
+    echo "Usage: $N {start|stop|restart}" >&2
+    exit 1
+    ;;
+esac
+
+exit 0

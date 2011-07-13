@@ -1,0 +1,59 @@
+#!/usr/bin/perl
+use common::sense;
+use Digest::HMAC_SHA1 qw(hmac_sha1_hex);
+use base 'Net::Server::Multiplex';
+
+my @key      = qw(example-bounce-key0 example-bounce-key1 example-bounce-key2 );
+my $curr_key = 1;
+my $domains  = qr{@(corp\.)?example\.com$};
+
+# Log Levels
+use constant {
+    LOG_ERR     => 0,
+    LOG_WARNING => 1,
+    LOG_NOTICE  => 2,
+    LOG_INFO    => 3,
+    LOG_DEBUG   => 4,
+};
+
+sub log {
+    my ($self,$level,$fmt,@rest) = @_;
+    if (defined $self->{net_server}){
+       $self->{net_server}->log($level,$fmt,@rest);
+    }else{
+        $self->SUPER::log($level,$fmt,@rest);
+    }
+}
+
+sub mux_input {
+    my ($self,$mux,$fh,$input) = @_;
+
+    my $day = int(time/(24*60*60))+8;
+    $day = substr($day,length($day)-3,3);
+
+    while ($$input =~ s/^(.*?)\r?\n//) {
+        my $line = $1;
+        if ($line eq 'get ""'){
+            $self->log(LOG_DEBUG, "Client %u: bounce message", $fh->fileno);
+            print "200 \"\"\n";
+        } elsif ($line =~ /^get (.+)@(.+)$/){
+            my ($box,$domain,$email) = ($1,$2,"$1\@$2");
+            if ($box =~ /prvs=\d{4}[0-9a-z]{6}$/i){
+                print $fh "200 $email\n";
+                $self->log(LOG_DEBUG, "Client %u: already signed: %s", $fh->fileno, $email);
+            }elsif($email =~ $domains){
+                my $digest = substr(hmac_sha1_hex($day.$key[$curr_key].$email),0,6);
+                print "200 $box+prvs=$curr_key$day$digest\@$domain\n";
+                $self->log(LOG_DEBUG, "Client %u: signing: %s", $fh->fileno, $email);
+            }else{
+                print "200 $email\n";
+                $self->log(LOG_DEBUG, "Client %u: not signing: %s", $fh->fileno, $email);
+            }
+        } else {
+            $self->log(LOG_WARNING, "Client %u: request mismatch: %s", $fh->fileno, $line);
+            print "400 mismatch: $line\n"
+        }
+    }
+}
+
+__PACKAGE__->run(conf_file => '/etc/postfix/perl/bounce-sign.conf');
