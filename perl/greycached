@@ -187,63 +187,44 @@ sub greylist {
         return;
     }
 
-    be_write('incr', "blacklist:$ip", 1,
-        sub {
-            my $blacklist = shift;
-            $blacklist =~ s/\r\n//g;
-            if (($blacklist =~ /^\d+$/) and ($blacklist > 100)){ 
-                syslog(LOG_INFO, "Blacklisted from=<$from> to=<$to> ip=<$ip>");
-                resp($client, 'action=defer_if_permit');
-            }else{
-                be_read('get',"whitelist:$net",
-                    # if whitelisted
-                    sub{
-                        be_write('delete',"blacklist:$ip", 0, sub {
-                            syslog(LOG_INFO, "Whitelisted from=<$from> to=<$to> ip=<$ip>");
-                            resp($client, 'action=dunno');
-                        });
-                    },
-                    # else
-                    sub{
-                        be_read('get', "greylist:$net:$from:$to",
-                            # if greylisted
-                            sub{
-                                my $last = (@_[0] =~ /\r\n(.+)\r\n/ && $1);
-                                if (($last == 1) or (time - $last > 60)) {
-                                    be_write('delete',"blacklist:$ip", 0, sub {
-                                        be_write('add', "whitelist:$net", 1, 604800, 
-                                            sub { 
-                                                syslog(LOG_INFO, "Greylist passed from=<$from> to=<$to> ip=<$ip>");
-                                                resp($client, 'action=dunno');
-                                            }
-                                        )
-                                    });
-                                }else{
-                                    syslog(LOG_INFO, "Greylist reactivated from=<$from> to=<$to> ip=<$ip>");
-                                    resp($client, 'action=defer_if_permit'); 
-                                }
-                            },
-                            # else
-                            sub{
-                                be_write('add',"greylist:$net:$from:$to", time, 10800,
-                                    sub{
-                                        syslog(LOG_INFO, "Greylist activated from=<$from> to=<$to> ip=<$ip>");
-                                        resp($client, 'action=defer_if_permit'); 
-                                    }
-                                );
-                                if ($blacklist !~ /^\d+$/){
-                                    # start blacklist counter if it does not exist (TTL 6h)
-                                    be_write('add',"blacklist:$ip", 1, 21600, sub {});
-                                }
+    be_read('get',"whitelist:$net",
+        # if whitelisted
+        sub{
+            syslog(LOG_INFO, "Whitelisted from=<$from> to=<$to> ip=<$ip>");
+            resp($client, 'action=dunno');
+        },
+        # else
+        sub{
+            be_read('get', "greylist:$net:$from:$to",
+                # if greylisted
+                sub{
+                    my $last = (@_[0] =~ /\r\n(.+)\r\n/ && $1);
+                    if (time - $last > 60) {
+                        be_write('add', "whitelist:$net", 1, 604800, 
+                            sub { 
+                                syslog(LOG_INFO, "Greylist passed from=<$from> to=<$to> ip=<$ip>");
+                                resp($client, 'action=dunno');
                             }
                         );
+                    }else{
+                        syslog(LOG_INFO, "Greylist reactivated from=<$from> to=<$to> ip=<$ip> last=<".
+                            (time-$last).">");
+                        resp($client, 'action=defer_if_permit'); 
                     }
-                );
-            }
+                },
+                # else
+                sub{
+                    be_write('add',"greylist:$net:$from:$to", time, 10800,
+                        sub{
+                            syslog(LOG_INFO, "Greylist activated from=<$from> to=<$to> ip=<$ip>");
+                            resp($client, 'action=defer_if_permit'); 
+                        }
+                    );
+                }
+            );
         }
     );
 }
-
 
 # Client
 sub req {
